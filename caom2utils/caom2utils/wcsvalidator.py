@@ -71,6 +71,7 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 from astropy.wcs import Wcsprm
+from astropy.io import fits
 from caom2utils.wcs_util import TimeUtil, EnergyUtil, ORIGIN
 from . import wcs_util
 from .wcs_util import PolarizationWcsUtil
@@ -164,7 +165,8 @@ def _validate_spatial_wcs(position):
             if position.axis.function is not None:
                 fn2D = position.axis.function
                 _check_transform(float(fn2D.dimension.naxis1 / 2),
-                                 float(fn2D.dimension.naxis2 / 2))
+                                 float(fn2D.dimension.naxis2 / 2),
+                                 position)
                 logger.debug('position_axis.function succeeded.')
         except Exception as e:
             error_string = repr(e)
@@ -175,8 +177,25 @@ def _validate_spatial_wcs(position):
                     error_string, str(position)))
 
 
-def _check_transform(lower, upper):
-    wcsprm = Wcsprm()
+def _check_transform(lower, upper, position=None):
+    if position:
+        fn2D = position.axis.function
+        hdr = fits.Header()
+        hdr['CTYPE1'] = position.axis.axis1.ctype
+        hdr['CUNIT1'] = position.axis.axis1.cunit
+        hdr['CTYPE2'] = position.axis.axis2.ctype
+        hdr['CUNIT2'] = position.axis.axis2.cunit
+        hdr['CRPIX1'] = fn2D.ref_coord.coord1.pix
+        hdr['CRVAL1'] = fn2D.ref_coord.coord1.val
+        hdr['CRPIX2'] = fn2D.ref_coord.coord2.pix
+        hdr['CRVAL2'] = fn2D.ref_coord.coord2.val
+        hdr['CD1_1'] = fn2D.cd11
+        hdr['CD1_2'] = fn2D.cd12
+        hdr['CD2_1'] = fn2D.cd21
+        hdr['CD2_2'] = fn2D.cd22
+        wcsprm = Wcsprm(hdr.tostring().encode())
+    else:
+        wcsprm = Wcsprm()
     coord_array = np.array([[lower, upper]])
     sky_transform = wcsprm.p2s(coord_array, ORIGIN)
     wcsprm.s2p(sky_transform['world'], ORIGIN)

@@ -127,11 +127,11 @@ class SpatialWCSValidatorTests(unittest.TestCase):
 
     # Without the toPolygon function moved over from Java, there's not
     # alot of way to test an invalid spatial wcs.
-    # def test_invalid_spatial_wcs(self):
-    #     spatialtest = SpatialTestUtil()
-    #     position = spatialtest.bad_wcs()
-    #     with self.assertRaises(InvalidWCSError):
-    #         WcsValidator.validate_spatial_wcs(position)
+    def test_invalid_spatial_wcs(self):
+        spatialtest = SpatialTestUtil()
+        position = spatialtest.bad_wcs()
+        with self.assertRaises(InvalidWCSError):
+            wcsvalidator._validate_spatial_wcs(position)
 
 
 @pytest.mark.skipif(single_test, reason='Single test mode')
