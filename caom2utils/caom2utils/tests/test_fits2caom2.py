@@ -71,6 +71,7 @@ from __future__ import (absolute_import, division, print_function,
 
 from astropy.io import fits
 from astropy.wcs import WCS as awcs
+from cadcutils import exceptions, net
 from caom2utils import FitsParser, WcsParser, main_app, update_blueprint
 from caom2utils import ObsBlueprint, GenericParser
 from caom2utils.legacy import load_config
@@ -80,7 +81,8 @@ from caom2 import ObservationWriter, SimpleObservation, Algorithm
 from caom2 import Artifact, ProductType, ReleaseType, ObservationIntentType
 from caom2 import get_differences, obs_reader_writer, ObservationReader, Chunk
 from caom2 import SpectralWCS, TemporalWCS, PolarizationWCS, SpatialWCS
-from caom2 import Axis, CoordAxis1D, CoordAxis2D
+from caom2 import Axis, CoordAxis1D, CoordAxis2D, ChecksumURI
+import logging
 
 import caom2utils
 
@@ -514,9 +516,10 @@ def test_help():
 
 EXPECTED_OBS_XML = """<?xml version='1.0' encoding='UTF-8'?>
 <caom2:Observation""" + \
-        """ xmlns:caom2="vos://cadc.nrc.ca!vospace/CADC/xml/CAOM/v2.0" """ + \
+        """ xmlns:caom2="http://www.opencadc.org/caom2/xml/v2.4" """ + \
         """xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" """ + \
-        """xsi:type="caom2:SimpleObservation" caom2:id="123">
+        """xsi:type="caom2:SimpleObservation" """ + \
+        """caom2:id="00000000-0000-0000-0000-000000000123">
   <caom2:collection>collection</caom2:collection>
   <caom2:observationID>MA1_DRAO-ST</caom2:observationID>
   <caom2:metaRelease>1999-01-01T00:00:00.000</caom2:metaRelease>
@@ -541,7 +544,7 @@ EXPECTED_OBS_XML = """<?xml version='1.0' encoding='UTF-8'?>
     <caom2:name>DRAO-ST</caom2:name>
   </caom2:instrument>
   <caom2:planes>
-    <caom2:plane caom2:id="123">
+    <caom2:plane caom2:id="00000000-0000-0000-0000-000000000124">
       <caom2:productID>HI-line</caom2:productID>
       <caom2:dataProductType>cube</caom2:dataProductType>
       <caom2:calibrationLevel>2</caom2:calibrationLevel>
@@ -553,11 +556,11 @@ EXPECTED_OBS_XML = """<?xml version='1.0' encoding='UTF-8'?>
         <caom2:lastExecuted>2000-10-16T00:00:00.000</caom2:lastExecuted>
       </caom2:provenance>
       <caom2:artifacts>
-        <caom2:artifact caom2:id="123">
+        <caom2:artifact caom2:id="00000000-0000-0000-0000-000000000125">
           <caom2:uri>caom:CGPS/TEST/4axes_obs.fits</caom2:uri>
           <caom2:productType>info</caom2:productType>
           <caom2:parts>
-            <caom2:part caom2:id="123">
+            <caom2:part caom2:id="00000000-0000-0000-0000-000000000126">
               <caom2:name>0</caom2:name>
               <caom2:chunks/>
             </caom2:part>
@@ -608,7 +611,7 @@ def test_augment_observation():
     test_part.chunks.pop()
     output = BytesIO()
     ow = ObservationWriter(False, False, "caom2",
-                           obs_reader_writer.CAOM20_NAMESPACE)
+                           obs_reader_writer.CAOM23_NAMESPACE)
     ow.write(test_obs, output)
     result = output.getvalue().decode('UTF-8')
     output.close()
@@ -946,6 +949,8 @@ EXPECTED_GENERIC_PARSER_FILE_SCHEME_XML = """<?xml version='1.0' encoding='UTF-8
   <caom2:planes>
     <caom2:plane caom2:id="00000000-0000-0000-8ffa-fc0a5a8759df">
       <caom2:productID>test_product_id</caom2:productID>
+      <caom2:dataProductType>image</caom2:dataProductType>
+      <caom2:calibrationLevel>3</caom2:calibrationLevel>
       <caom2:artifacts>
         <caom2:artifact caom2:id="00000000-0000-0000-8ffa-fc0a5a8759df">
           <caom2:productType>thumbnail</caom2:productType>
@@ -1248,19 +1253,102 @@ def test_get_vos_meta():
 
 
 @pytest.mark.skipif(single_test, reason='Single test mode')
-def test_generic_parser():
+def test_generic_parser1():
     test_key = 'Plane.metaRelease'
     test_value = '2013-10-10'
     test_blueprint = ObsBlueprint()
     test_blueprint.set(test_key, '2013-10-10')
-    import logging
     logging.error(test_blueprint)
     test_parser = GenericParser()
     assert test_parser._blueprint._plan[test_key] == \
-           (['RELEASE', 'REL_DATE'], None), 'default value changed'
+        (['RELEASE', 'REL_DATE'], None), 'default value changed'
     test_parser.blueprint = test_blueprint
     assert test_parser._blueprint._plan[test_key] == test_value, \
         'original value over-ridden'
+
+
+@pytest.mark.skipif(single_test, reason='Single test mode')
+def test_get_external_headers():
+    test_uri = 'http://localhost/obs23/collection/obsid-1'
+    with patch('requests.Session.get') as session_get_mock:
+        session_get_mock.return_value.status_code = 200
+        session_get_mock.return_value.text = TEST_TEXT
+        test_headers = caom2utils.fits2caom2.get_external_headers(test_uri)
+        assert test_headers is not None
+        assert len(test_headers) == 2
+        assert test_headers[0]['SIMPLE'] is True, 'SIMPLE header not found'
+        assert session_get_mock.is_called, 'mock not called'
+        assert session_get_mock.is_called_with(test_uri)
+
+
+@pytest.mark.skipif(single_test, reason='Single test mode')
+def test_apply_blueprint():
+    # test a Gemini case where there are two keywords, one each for
+    # different instruments, and the default ends up getting set when the
+    # other keyword is not found, as opposed to when both keywords are
+    # missing
+    #
+    # default should only be set when both keywords are not found
+    hdr1 = fits.Header()
+    hdr1['ORIGIN'] = '123'
+    test_blueprint = ObsBlueprint()
+    test_blueprint.set_default('Plane.provenance.producer', 'abc')
+    test_blueprint.add_fits_attribute('Plane.provenance.producer', 'IMAGESWV')
+    test_parser = FitsParser(src=[hdr1], obs_blueprint=test_blueprint)
+    logging.error(test_parser._headers)
+    assert test_parser._headers[0]['ORIGIN'] == '123', 'existing over-ridden'
+    with pytest.raises(KeyError):
+        test_parser._headers[0]['IMAGESWV'], 'should not be set'
+
+    hdr1 = fits.Header()
+    test_parser = FitsParser(src=[hdr1], obs_blueprint=test_blueprint)
+    logging.error(test_parser._headers)
+    assert test_parser._headers[0]['ORIGIN'] == 'abc', 'should be set'
+
+    with pytest.raises(KeyError):
+        test_parser._headers[0]['IMAGESWV'], 'should not be set'
+
+
+@pytest.mark.skipif(single_test, reason='Single test mode')
+def test_update_artifact_meta_errors():
+    test_uri = 'gemini:GEMINI/abc.jpg'
+    test_artifact = Artifact(uri=test_uri,
+                             product_type=ProductType.SCIENCE,
+                             release_type=ReleaseType.DATA)
+    with pytest.raises(NotImplementedError):
+        test_cirada = 'cirada://abc'
+        _update_artifact_meta(test_cirada, test_artifact)
+
+    with patch('caom2utils.fits2caom2._get_cadc_meta') as get_meta_mock:
+        get_meta_mock.return_value = {'type': 'application/octet',
+                                      'size': 42,
+                                      'md5sum': 'md5:42'}
+        test_uri = 'gemini://test.fits'
+        _update_artifact_meta(test_uri, test_artifact)
+        assert test_artifact.content_checksum is None, 'checksum'
+        assert test_artifact.content_length is None, 'length'
+        assert test_artifact.content_type is None, 'type'
+
+        test_uri = 'gemini:GEMINI/abc.jpg'
+        _update_artifact_meta(test_uri, test_artifact)
+        assert test_artifact.content_checksum == ChecksumURI(uri='md5:42'), \
+            'checksum'
+        assert test_artifact.content_length == 42, 'length'
+        assert test_artifact.content_type == 'application/octet', 'type'
+
+    with patch('caom2utils.fits2caom2._get_cadc_meta') as get_meta_mock:
+        def _mock(ig, nore):
+            logging.error('here?')
+            raise exceptions.NotFoundException()
+        get_meta_mock.side_effect = _mock
+        test_uri = 'file:///test.fits.header'
+        test_artifact = Artifact(uri=test_uri,
+                                 product_type=ProductType.SCIENCE,
+                                 release_type=ReleaseType.DATA)
+        _update_artifact_meta(test_uri, test_artifact, net.Subject())
+        assert test_artifact.content_type is None, 'type'
+        assert test_artifact.content_length is None, 'length'
+        assert test_artifact.content_checksum is None, 'checksum'
 
 
 def _get_headers(subject):
@@ -1277,6 +1365,37 @@ END
         [e + delim for e in x.split(delim) if e.strip()]
     headers = [fits.Header.fromstring(e, sep='\n') for e in extensions]
     return headers
+
+
+TEST_TEXT = """Filename: GN2001BQ013-04.fits.bz2
+
+AstroData Types: ['GMOS_N', 'GEMINI', 'GMOS_SPECT']
+
+
+--- HDU 0 ---
+SIMPLE  =                    T / Fits standard
+BITPIX  =                   16 / Bits per pixel
+NAXIS   =                    0 / Number of axes
+EXTEND  =                    T / File may contain extensions
+IRAF-TLM= '2010-05-12T13:35:33' / Time of last modification
+DATE    = '2001-12-11'         / Date tape was written
+ORIGIN  = 'STScI-STSDAS'       / Fitsio version 21-Feb-1996
+FILENAME= 'null_image'         / ZERO LENGTH DUMMY IMAGE
+GEMPRGID= 'GN-2001B-Q-13'
+RELEASE = '2003-02-01'         / End of proprietary period YYYY-MM-DD
+DATE-OBS= '2001-08-01'
+INSTRUME= 'GMOS-N  '
+OBSTYPE = 'MASK    '
+DATALAB = 'GN2001BQ013-04'
+
+--- HDU 1 ---
+XTENSION= 'BINTABLE'           / Binary table extension
+BITPIX  =                    8 / 8-bits per 'pixels'
+NAXIS   =                    2 / Simple 2-D matrix
+NAXIS1  =                   86 / Number of characters per row
+NAXIS2  =                   26
+PCOUNT  =                    0 / No 'random' parameters
+"""
 
 
 def _get_node(uri, limit, force):
