@@ -79,6 +79,7 @@ from caom2 import Artifact, Chunk, Observation, Part, Plane, \
     PolarizationState
 import numpy as np
 import logging
+from matplotlib.path import Path
 
 
 APP_NAME = 'wcsvalidator'
@@ -185,6 +186,34 @@ def _validate_spatial_wcs(position):
             raise InvalidWCSError(
                 "Invalid SpatialWCS: {}: {}".format(
                     error_string, str(position)))
+
+        # DR: Disabling for now as this is too aggressive
+        # _validate_spatial_bounds(position)
+
+
+def _validate_spatial_bounds(position):
+    # Validate that the crval1/2 is inside the designated polygon
+    # This is too aggressive, as small offsets are fine
+
+    try:
+        points = position.axis.bounds.vertices
+        vertices = [(i.coord1, i.coord2) for i in points]
+        mpath = Path(vertices)
+    except AttributeError:  # not a polygon
+        mpath = Path.circle(center=(position.axis.bounds.center.coord1, position.axis.bounds.center.coord2),
+                            radius=position.axis.bounds.radius)
+
+    if mpath is None:
+        raise InvalidWCSError('Failed to generate path from bounds')
+
+    if position.axis.function is not None:
+        fn2D = position.axis.function
+        # For counterclockwise paths, positive radius grows the path to search to include points that lie radius/2 away
+        if not mpath.contains_point((fn2D.ref_coord.coord1.val, fn2D.ref_coord.coord2.val), radius=0.5):
+            raise InvalidWCSError('failed to place point ({},{}) in polygon: {}'.\
+                                  format(fn2D.ref_coord.coord1.val,
+                                         fn2D.ref_coord.coord2.val,
+                                         position.axis.bounds))
 
 
 def _check_transform(lower, upper, position=None):
