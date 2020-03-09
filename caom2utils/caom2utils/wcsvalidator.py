@@ -70,7 +70,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from astropy.wcs import Wcsprm
+from astropy.wcs import Wcsprm, WCS
 from astropy.io import fits
 from caom2utils.wcs_util import TimeUtil, EnergyUtil, ORIGIN
 from . import wcs_util
@@ -79,7 +79,6 @@ from caom2 import Artifact, Chunk, Observation, Part, Plane, \
     PolarizationState
 import numpy as np
 import logging
-from matplotlib.path import Path
 
 
 APP_NAME = 'wcsvalidator'
@@ -152,7 +151,7 @@ def _validate_chunk(chunk):
     Validate all WCS in this chunk individually
     """
     _validate_axes(chunk)
-    _validate_spatial_wcs(chunk.position)
+    _validate_spatial_wcs(chunk.position, chunk.naxis)
     _validate_spectral_wcs(chunk.energy)
     _validate_temporal_wcs(chunk.time)
     _validate_polarization_wcs(chunk.polarization)
@@ -167,7 +166,7 @@ def _validate_chunk(chunk):
                     error_string, str(chunk.custom_axis), str(chunk.custom)))
 
 
-def _validate_spatial_wcs(position):
+def _validate_spatial_wcs(position, naxis):
     # position is a SpatialWCS
     error_string = ""
     if position is not None and position.axis is not None:
@@ -187,33 +186,40 @@ def _validate_spatial_wcs(position):
                 "Invalid SpatialWCS: {}: {}".format(
                     error_string, str(position)))
 
-        # DR: Disabling for now as this is too aggressive
-        # _validate_spatial_bounds(position)
+        if naxis == 2:
+            _validate_spatial_boundswcs(position)
 
 
-def _validate_spatial_bounds(position):
-    # Validate that the crval1/2 is inside the designated polygon
-    # This is too aggressive, as small offsets are fine
-
-    try:
-        points = position.axis.bounds.vertices
-        vertices = [(i.coord1, i.coord2) for i in points]
-        mpath = Path(vertices)
-    except AttributeError:  # not a polygon
-        mpath = Path.circle(center=(position.axis.bounds.center.coord1, position.axis.bounds.center.coord2),
-                            radius=position.axis.bounds.radius)
-
-    if mpath is None:
-        raise InvalidWCSError('Failed to generate path from bounds')
-
-    if position.axis.function is not None:
+def _validate_spatial_boundswcs(position):
+    # Check that the bounds are within the WCS definition
+    if position.axis.function and position.axis.bounds:
         fn2D = position.axis.function
-        # For counterclockwise paths, positive radius grows the path to search to include points that lie radius/2 away
-        if not mpath.contains_point((fn2D.ref_coord.coord1.val, fn2D.ref_coord.coord2.val), radius=0.5):
-            raise InvalidWCSError('failed to place point ({},{}) in polygon: {}'.\
-                                  format(fn2D.ref_coord.coord1.val,
-                                         fn2D.ref_coord.coord2.val,
-                                         position.axis.bounds))
+
+        w = WCS(naxis=2)
+        w.wcs.crpix = [fn2D.ref_coord.coord1.pix, fn2D.ref_coord.coord2.pix]
+        w.wcs.crval = [fn2D.ref_coord.coord1.val, fn2D.ref_coord.coord2.val]
+        w.wcs.cunit = [position.axis.axis1.cunit, position.axis.axis2.cunit]
+        w.wcs.ctype = [position.axis.axis1.ctype, position.axis.axis2.ctype]
+        w.wcs.cd = [[fn2D.cd11, fn2D.cd12],
+                    [fn2D.cd21, fn2D.cd22]]
+        try:
+            points = position.axis.bounds.vertices
+            vertices = [(i.coord1, i.coord2) for i in points]
+            cval1, cval2 = vertices[0][0], vertices[0][1]
+        except AttributeError:  # not a polygon
+            cval1, cval2 = position.axis.bounds.center.coord1, position.axis.bounds.center.coord2
+
+        coord_array = np.array([[cval1, cval2]])
+        sky_transform = w.wcs_world2pix(coord_array, ORIGIN)
+        new_coords = w.wcs_pix2world(sky_transform, ORIGIN)
+
+        # Assert that going from sky-pix-sky you get approximately the same value
+        thresh = 1e-5
+        if np.isnan(new_coords).any() or \
+                coord_array[0][0] - new_coords[0][0] > thresh or \
+                coord_array[0][1] - new_coords[0][1] > thresh:
+            error = 'Could not transform {} = {} (CRVAL: {})'.format(coord_array[0], new_coords[0], w.wcs.crval)
+            raise InvalidWCSError(error)
 
 
 def _check_transform(lower, upper, position=None):
