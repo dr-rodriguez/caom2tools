@@ -166,7 +166,7 @@ def _validate_chunk(chunk):
                     error_string, str(chunk.custom_axis), str(chunk.custom)))
 
 
-def _validate_spatial_wcs(position, naxis):
+def _validate_spatial_wcs(position, naxis=1):
     # position is a SpatialWCS
     error_string = ""
     if position is not None and position.axis is not None:
